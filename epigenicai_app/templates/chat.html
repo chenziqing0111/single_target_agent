@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EpigenicAI - 智能生物医学研究助手</title>
+    <link rel="stylesheet" href="/static/css/chat.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- 侧边栏 -->
+        <div class="sidebar">
+            <div class="logo">
+                <i class="fas fa-dna"></i>
+                <h1>EpigenicAI</h1>
+            </div>
+            
+            <div class="menu">
+                <div class="menu-item active">
+                    <i class="fas fa-comments"></i>
+                    <span>智能对话</span>
+                </div>
+                <div class="menu-item">
+                    <i class="fas fa-history"></i>
+                    <span>历史记录</span>
+                </div>
+                <div class="menu-item">
+                    <i class="fas fa-cog"></i>
+                    <span>设置</span>
+                </div>
+            </div>
+            
+            <div class="sidebar-footer">
+                <div class="user-info">
+                    <i class="fas fa-user-circle"></i>
+                    <span>研究员</span>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 主内容区 -->
+        <div class="main-content">
+            <!-- 聊天区域 -->
+            <div class="chat-container">
+                <div class="chat-header">
+                    <h2>生物医学研究助手</h2>
+                    <div class="header-actions">
+                        <button class="btn-icon" title="清空对话">
+                            <i class="fas fa-trash"></i>
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="chat-messages" id="chatMessages">
+                    <div class="welcome-message">
+                        <i class="fas fa-dna fa-3x"></i>
+                        <h3>欢迎使用 EpigenicAI</h3>
+                        <p>我是您的智能生物医学研究助手，可以帮助您进行：</p>
+                        <div class="features">
+                            <div class="feature-item">
+                                <i class="fas fa-flask"></i>
+                                <span>临床试验分析</span>
+                            </div>
+                            <div class="feature-item">
+                                <i class="fas fa-file-alt"></i>
+                                <span>专利景观分析</span>
+                            </div>
+                            <div class="feature-item">
+                                <i class="fas fa-book"></i>
+                                <span>文献综合分析</span>
+                            </div>
+                        </div>
+                        <p class="hint">请描述您的研究需求，例如："帮我分析BRCA1基因的临床试验现状"</p>
+                    </div>
+                </div>
+                
+                <div class="chat-input-container">
+                    <div class="input-wrapper">
+                        <textarea 
+                            id="chatInput" 
+                            class="chat-input" 
+                            placeholder="输入您的研究问题..."
+                            rows="1"
+                        ></textarea>
+                        <button id="sendBtn" class="send-btn">
+                            <i class="fas fa-paper-plane"></i>
+                        </button>
+                    </div>
+                    <div class="input-hints">
+                        <span>按 Enter 发送，Shift + Enter 换行</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 任务状态面板 -->
+            <div class="task-panel" id="taskPanel" style="display: none;">
+                <div class="panel-header">
+                    <h3>任务进度</h3>
+                    <button class="btn-icon" onclick="toggleTaskPanel()">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+                
+                <div class="task-list" id="taskList">
+                    <!-- 任务项将动态插入 -->
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- 加载动画 -->
+    <div class="loading-overlay" id="loadingOverlay" style="display: none;">
+        <div class="loading-spinner">
+            <div class="spinner"></div>
+            <p>正在处理您的请求...</p>
+        </div>
+    </div>
+    
+    <!-- CSRF Token -->
+    {% csrf_token %}
+    <script>
+        // 设置CSRF token
+        window.csrfToken = '{{ csrf_token }}';
+    </script>
+    <script src="/static/js/chat.js"></script>
+</body>
+</html>

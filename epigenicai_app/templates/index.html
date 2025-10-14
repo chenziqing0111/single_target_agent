@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>EpigenicAI 助理</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 min-h-screen">
+  <div class="max-w-4xl mx-auto mt-10 p-6 bg-white rounded shadow-md">
+    <h1 class="text-2xl font-bold mb-4">EpigenicAI 工作助理</h1>
+
+    <!-- 起始选项 -->
+    <div class="mb-6 space-x-4">
+      <button class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600">
+        靶点调研报告
+      </button>
+      <button class="bg-gray-400 text-white px-4 py-2 rounded cursor-not-allowed">
+        其他功能开发中
+      </button>
+    </div>
+
+    <!-- 对话区域 -->
+    <div id="chat-box" class="h-64 overflow-y-auto p-4 bg-gray-50 border rounded mb-4">
+      <div class="text-gray-700 mb-2"><strong>AI 助理：</strong>希望我做点什么呢？</div>
+    </div>
+
+    <!-- 输入框 -->
+    <form id="chat-form" class="flex space-x-2">
+      <input id="user-input" type="text" placeholder="请输入您的需求..." class="flex-grow border p-2 rounded">
+      <button type="submit" class="bg-blue-500 text-white px-4 py-2 rounded">发送</button>
+    </form>
+  </div>
+
+  <!-- 工具按钮（右下角浮动） -->
+  <div class="fixed bottom-6 right-6">
+    <button id="tool-button" class="bg-green-500 text-white px-4 py-2 rounded-full shadow-lg">
+      工具 +
+    </button>
+
+    <div id="tool-panel" class="hidden mt-2 bg-white shadow-lg rounded p-4">
+      <label class="block mb-2"><input type="checkbox" class="mr-2"> 背景介绍</label>
+      <label class="block mb-2"><input type="checkbox" class="mr-2"> 表观调控机制</label>
+      <label class="block mb-2"><input type="checkbox" class="mr-2"> 实验与临床进展</label>
+      <label class="block mb-2"><input type="checkbox" class="mr-2"> 专利与市场调研</label>
+    </div>
+  </div>
+
+  <script>
+    document.getElementById("chat-form").addEventListener("submit", async function(e) {
+      e.preventDefault();
+      const input = document.getElementById("user-input");
+      const message = input.value.trim();
+      const chatBox = document.getElementById("chat-box");
+
+      if (message) {
+        // 显示用户消息
+        chatBox.innerHTML += `<div class="text-blue-600 mb-2"><strong>你：</strong>${message}</div>`;
+
+        // 清空输入框
+        input.value = "";
+
+        // 显示加载中
+        chatBox.innerHTML += `<div class="text-gray-500 mb-2" id="loading-msg"><strong>AI 助理：</strong>生成中，请稍等...</div>`;
+        chatBox.scrollTop = chatBox.scrollHeight;
+
+        // 发送请求到后端
+        try {
+          const response = await fetch("/chat/", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/x-www-form-urlencoded"
+            },
+            body: `query=${encodeURIComponent(message)}`
+          });
+
+          const data = await response.json();
+          document.getElementById("loading-msg").remove(); // 移除“生成中”
+
+          if (data.report) {
+            chatBox.innerHTML += `<div class="text-gray-700 mb-2"><strong>AI 助理：</strong>${data.report.replace(/\n/g, "<br>")}</div>`;
+          } else if (data.error) {
+            chatBox.innerHTML += `<div class="text-red-600 mb-2"><strong>AI 助理：</strong>出错了：${data.error}</div>`;
+          }
+
+        } catch (error) {
+          document.getElementById("loading-msg").remove();
+          chatBox.innerHTML += `<div class="text-red-600 mb-2"><strong>AI 助理：</strong>请求失败：${error}</div>`;
+        }
+
+        chatBox.scrollTop = chatBox.scrollHeight;
+      }
+    });
+
+    document.getElementById("tool-button").addEventListener("click", function() {
+      const panel = document.getElementById("tool-panel");
+      panel.classList.toggle("hidden");
+    });
+  </script>
+</body>
+</html>
