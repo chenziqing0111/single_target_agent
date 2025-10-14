@@ -1,0 +1,37 @@
+name: agent_env
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - numpy
+  - pandas
+  - matplotlib
+  - requests
+  - tqdm
+  - lxml
+  - beautifulsoup4
+  - pip:
+    - langchain>=0.1.14
+    - duckduckgo-search
+    - openai
+    - langchainhub
+    - langchain-community
+    - python-docx
+    - python-pptx
+    - pubmed-api
+    - unstructured
+    - huggingface-hub
+    - deepseek-openai
+    - tiktoken
+    - python-dotenv
+    - aiohttp
+    - sentence-transformers
+    - fastapi
+    - uvicorn
+
+pip install tiktoken python-dotenv aiohttp sentence-transformers fastapi uvicorn
+pip install git+https://github.com/deepseek-ai/openai.git
+pip install django
+pip install django-cors-headers
