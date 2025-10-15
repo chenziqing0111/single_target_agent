@@ -1,17 +1,16 @@
+# epigenicai_app/urls.py
 from django.urls import path
 from . import views
-
+from django.shortcuts import redirect
 urlpatterns = [
-    # 新的聊天界面
-    path('', views.chat_home, name='chat_home'),  # 聊天主页
-    path('chat/', views.chat_home, name='chat'),  # 聊天界面（兼容）
+    # 使用已存在的index视图作为主页
+    # path('', views.index, name='index'),
     
     # API端点
-    path('api/chat/', views.chat_api, name='chat_api'),  # 聊天API
-    path('api/task-status/<str:task_id>/', views.task_status_api, name='task_status_api'),  # 任务状态API
-    path('api/report/<str:task_id>/', views.report_api, name='report_api'),  # 报告API
+    path('AIagent/', views.AIagent_view, name='AIagent'),
+    path('AIagent/chat/', views.AIagent_chat, name='AIagent_chat'),
     
-    # 保留原有端点作为备份
-    path('index/', views.index, name='index'),  # 原首页
-    path('old-chat/', views.chat, name='old_chat'),  # 原聊天处理
+    # 如果你想保留其他URL（可选）
+    # path('chat/', views.chat, name='chat'),  # 如果有chat视图
+    path('', lambda request: redirect('AIagent')),
 ]
