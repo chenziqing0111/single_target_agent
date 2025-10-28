@@ -47,14 +47,15 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
-    'django.contrib.sessions.middleware.SessionMiddleware',
+    'django.contrib.sessions.middleware.SessionMiddleware',      # ✅ 必须有
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
-    'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'django.contrib.messages.middleware.MessageMiddleware',
-    'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    'corsheaders.middleware.CorsMiddleware',
+    'django.contrib.auth.middleware.AuthenticationMiddleware',   # ✅ 必须有
+    'django.contrib.messages.middleware.MessageMiddleware',      # ✅ 必须有（解决你当前错误）
+    'django.middleware.clickjacking.XFrameOptionsMiddleware'
 ]
+
+
 
 ROOT_URLCONF = 'django_project.urls'
 
@@ -133,3 +134,12 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 CORS_ORIGIN_ALLOW_ALL = True
+
+# Session 配置
+SESSION_ENGINE = 'django.contrib.sessions.backends.db'
+SESSION_COOKIE_AGE = 86400  # 24小时
+SESSION_SAVE_EVERY_REQUEST = True  # 每次请求都保存
+SESSION_COOKIE_SECURE = False  # 开发环境设为False
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = 'Lax'  # 或 'Strict'
+SESSION_COOKIE_NAME = 'sessionid'

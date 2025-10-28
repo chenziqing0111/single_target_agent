@@ -103,7 +103,7 @@ class PatentAnalysisSystem:
             self.log(f"LLM调用失败: {str(e)}", "ERROR")
             return ""
 
-# %%
+
 # ==================== Step 1: 智慧芽API接口 ====================
 
 class ZhihuiyaAPI:
@@ -145,15 +145,18 @@ class ZhihuiyaAPI:
             }
             params = {"apikey": self.system.api_key}
             
+            limit= min(int(limit), 300)
             payload = {
-                "sort": [{"field": "SCORE", "order": "DESC"}],
+                "sort": [{"field": "SCORE", "order": "DESC"},
+                        {"field": "PBDT_YEARMONTHDAY", "order": "DESC"}],
                 "limit": limit,
                 "offset": 0,
+                "stemming": 0,
                 "query_text": query,
-                "collapse_by": "PBD",
-                "collapse_type": "ALL"
+                "collapse_by": "SCORE",
+                "collapse_type": "APNO",
+                "collapse_order": "LATEST"
             }
-            
             self.system.log(f"🔍 检索专利: {query} (限制{limit}件)")
             response = self.system.session.post(url, params=params, json=payload, headers=headers)
             response.raise_for_status()
@@ -281,8 +284,7 @@ class ZhihuiyaAPI:
             self.system.log(f"说明书获取失败: {str(e)}", "ERROR")
             return None
 
-# %%
-# ==================== Step 2: 专利初步分析与筛选 ====================
+#====== Step 2: 专利初步分析与筛选 ====================
 
 class PatentScreener:
     """专利筛选与评分"""
@@ -478,8 +480,45 @@ class PatentScreener:
         df_sorted = df.sort_values("final_score", ascending=False)
         
         return df_sorted
+    def is_gene_context(self, text: str, gene_name: str, aliases: list = None) -> bool:
+        """判断文本中是否出现目标基因（支持别名与常见命名变体）"""
+        import re
+        text_l = (text or "").lower()
+        g = gene_name.lower().replace("-", "").replace(" ", "")
+        patterns = [rf"\b{g}\b", rf"\binterleukin\s*{g[2:]}\b"]
 
-# %%
+        if aliases:
+            for a in aliases:
+                alias_norm = a.lower().replace("-", "").replace(" ", "")
+                patterns.append(rf"\b{alias_norm}\b")
+
+        return any(re.search(p, text_l) for p in patterns)
+
+    def filter_by_gene_context(self, df, gene_name: str, aliases: list = None):
+        """基于标题与摘要的正则+语义共现过滤"""
+        import re
+        self.system.log(f"🧩 正则+语义过滤启动 ({gene_name}) ...", "INFO")
+
+        def contains_bio_keywords(text: str) -> bool:
+            text_l = (text or "").lower()
+            bio_keywords = [
+                "gene", "receptor", "cytokine", "protein", "signal",
+                "expression", "mutation", "pathway", "antibody", "ligand"
+            ]
+            return any(re.search(rf"\b{kw}\b", text_l) for kw in bio_keywords)
+
+        def keep_row(row):
+            text = f"{row.get('title','')} {row.get('abstract','')}"
+            return (
+                self.is_gene_context(text, gene_name, aliases)
+                and contains_bio_keywords(text)
+            )
+
+        before_n = len(df)
+        df_filtered = df[df.apply(keep_row, axis=1)].reset_index(drop=True)
+        self.system.log(f"✅ 过滤完成：{len(df_filtered)}/{before_n} 条有效专利", "SUCCESS")
+        return df_filtered
+
 # ==================== Step 3: 深度分析Prompts ====================
 
 class PatentAnalysisPrompts:
@@ -644,7 +683,51 @@ class PatentAnalysisPrompts:
 5. 总字数3000-4000字
 """
 
-# %%
+class GeneQueryBuilder:
+    def __init__(self, llm_client, logger=None):
+        self.llm_client = llm_client
+        self.logger = logger
+
+    def get_aliases(self, gene_name: str) -> list:
+        """调用LLM获取别名"""
+        try:
+            if self.logger:
+                self.logger(f"🧬 正在为 {gene_name} 生成别名...")
+
+            prompt = f"""
+            请列出与基因 {gene_name} 相关的常见别名或缩写，
+            格式为逗号分隔。例如：IL11 -> IL-11, Interleukin 11, IL11RA。
+            只输出别名列表，不要解释。
+            """
+            response = self.llm_client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": "你是生物命名专家，熟悉基因别名命名规则。"},
+                    {"role": "user", "content": prompt}
+                ],
+                stream=False
+            )
+
+            alias_raw = response.choices[0].message.content
+            aliases = [a.strip() for a in alias_raw.replace("，", ",").split(",") if a.strip()]
+            if self.logger:
+                self.logger(f"✅ 生成 {len(aliases)} 个别名: {aliases}")
+            return aliases
+
+        except Exception as e:
+            if self.logger:
+                self.logger(f"[WARN] 别名生成失败: {str(e)}")
+            return []
+
+    def build_patent_query(self, gene_name: str, aliases: list) -> str:
+        """基于别名构建智慧芽专利检索式"""
+        alias_block = " OR ".join([f'"{a}"' for a in aliases]) if aliases else ""
+        alias_block = f'"{gene_name}"' + (f" OR {alias_block}" if alias_block else "")
+        query = f'(TAC:({alias_block})) AND (gene OR cytokine OR receptor OR protein OR signal*)'
+        if self.logger:
+            self.logger(f"✅ Query 构建完成: {query}")
+        return query
+
 # ==================== Step 4: 主流程执行 ====================
 
 class PatentAnalysisPipeline:
@@ -677,14 +760,19 @@ class PatentAnalysisPipeline:
         # 初始化Prompts
         self.prompts = PatentAnalysisPrompts(self.target_gene)
         
+        builder = GeneQueryBuilder(self.system.llm_client, self.system.log)
+
+        # 生成 alias + 构建 query
+        alias_list = builder.get_aliases(self.target_gene)
+        query_text = builder.build_patent_query(self.target_gene, alias_list)
+
         # ========== Step 1: 获取专利数据 ==========
         self.system.log("=" * 50)
         self.system.log(f"🚀 Step 1: 获取{self.target_gene}相关专利数据", "INFO")
         
         # 1.1 搜索专利
         # search_results = self.api.search_patents(self.target_gene, limit=500)
-        search_results = self.api.search_patents(self.target_gene, limit=10)
-
+        search_results = self.api.search_patents(query_text, limit=10)
         if not search_results:
             self.system.log(f"未找到{self.target_gene}相关专利", "ERROR")
             return {}
@@ -699,6 +787,9 @@ class PatentAnalysisPipeline:
         
         # 2.1 补充摘要和法律状态
         df_patents = self.screener.enrich_with_abstracts(df_patents, self.api)
+        
+        #正则与语义过滤
+        # df_patents = self.screener.filter_by_gene_context(df_patents, self.target_gene, alias_list)
         
         # 2.2 统计分析
         statistics = self.screener.analyze_patent_statistics(df_patents)

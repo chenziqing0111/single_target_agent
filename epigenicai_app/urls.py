@@ -11,6 +11,7 @@ urlpatterns = [
     path('AIagent/chat/', views.AIagent_chat, name='AIagent_chat'),
     path('AIagent/history/', views.AIagent_history, name='AIagent_history'),
     path('AIagent/clear/', views.AIagent_clear, name='AIagent_clear'),
+     path('AIagent/status/', views.AIagent_status, name='AIagent_status'),
     
     # 重定向根路径到AIagent
     path('', lambda request: redirect('AIagent')),

@@ -575,6 +575,23 @@
         .chat-messages::-webkit-scrollbar-thumb:hover {
             background: #555;
         }
+
+        .report-link {
+            display: inline-block;
+            padding: 10px 20px;
+            margin: 10px 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white !important;
+            text-decoration: none;
+            border-radius: 8px;
+            font-weight: 600;
+            box-shadow: 0 3px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .report-link:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(102, 126, 234, 0.6);
+        }
     </style>
 </head>
 <body>
@@ -738,58 +755,70 @@
 
     // 格式化消息
     function formatMessage(text) {
-        // 基本格式化
-        let formatted = text
-            .replace(/\n/g, '<br>')
-            .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-            .replace(/\*(.*?)\*/g, '<em>$1</em>')
-            .replace(/`([^`]+)`/g, '<code>$1</code>');
-        
-        // 处理列表
-        formatted = formatted.replace(/^• (.+)$/gm, '<li>$1</li>');
-        formatted = formatted.replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>');
-        
-        // 高亮基因名称
-        formatted = formatted.replace(/\b([A-Z][A-Z0-9]{1,10}(?:[-][A-Z0-9]+)?)\b/g, (match) => {
-            if (match.length >= 2 && /[0-9]|-/.test(match)) {
-                return `<span class="gene-name">${match}</span>`;
-            }
-            return match;
-        });
-        
-        return formatted;
-    }
+    formatted = text.replace(/(reports\/[^\s]+\.html)/gi, 
+        '<a href="/$1" target="_blank" class="report-link">📄 点击查看报告</a>');
+    
+    
+    // 2️⃣ 处理代码块（修复你的正则错误）
+    formatted = formatted.replace(/`([^`]+)`/g, '<code>$1</code>');
+    
+    // 3️⃣ 处理粗体和斜体  
+    formatted = formatted.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+    formatted = formatted.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+    
+    // 4️⃣ 处理换行
+    formatted = formatted.replace(/\n/g, '<br>');
+    
+    // 5️⃣ 处理列表
+    formatted = formatted.replace(/^• (.+)$/gm, '<li>$1</li>');
+    formatted = formatted.replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>');
+    
+    // 6️⃣ 高亮基因名称
+    formatted = formatted.replace(/\b([A-Z][A-Z0-9]{1,10}(?:[-][A-Z0-9]+)?)\b/g, (match) => {
+        if (match.length >= 2 && /[0-9]|-/.test(match)) {
+            return `<span class="gene-name">${match}</span>`;
+        }
+        return match;
+    });
+    
+    return formatted;
+}
 
     // 显示打字指示器
     function showTypingIndicator() {
-        const indicator = document.getElementById('typingIndicator');
-        const messagesDiv = document.getElementById('chatMessages');
-        
-        const typingMessage = document.createElement('div');
-        typingMessage.className = 'message assistant';
-        typingMessage.id = 'typingMessage';
-        
-        typingMessage.innerHTML = `
-            <div class="message-avatar">
-                <div class="message-avatar-logo">
-                    <img src="/static/img/logo-onlylogo.png" alt="AI">
-                </div>
+    const messagesDiv = document.getElementById('chatMessages');
+
+    // 删除旧的打字提示，防止重复堆叠
+    const oldTyping = document.getElementById('typingMessage');
+    if (oldTyping) oldTyping.remove();
+
+    // 创建一个新的“AI消息中”容器
+    const typingMessage = document.createElement('div');
+    typingMessage.className = 'message assistant';
+    typingMessage.id = 'typingMessage';
+
+    typingMessage.innerHTML = `
+        <div class="message-avatar">
+            <div class="message-avatar-logo">
+                <img src="/static/img/logo-onlylogo.png" alt="AI">
             </div>
-        `;
-        
-        typingMessage.appendChild(indicator);
-        indicator.classList.add('show');
-        messagesDiv.appendChild(typingMessage);
-        messagesDiv.scrollTop = messagesDiv.scrollHeight;
-    }
+        </div>
+        <div class="typing-indicator show">
+            <span></span><span></span><span></span>
+        </div>
+    `;
+
+    messagesDiv.appendChild(typingMessage);
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+}
+
 
     // 隐藏打字指示器
-    function hideTypingIndicator() {
-        const typingMessage = document.getElementById('typingMessage');
-        if (typingMessage) {
-            typingMessage.remove();
-        }
-    }
+function hideTypingIndicator() {
+    const typingMessage = document.getElementById('typingMessage');
+    if (typingMessage) typingMessage.remove();
+}
+
 
     // 添加消息到聊天界面
     function addMessage(text, sender, markers = []) {
@@ -862,20 +891,25 @@
         showTypingIndicator();
         
         try {
+            console.log('发送请求前 - SessionID:', sessionId);
+            console.log('发送请求前 - Document Cookie:', document.cookie);
+
             const response = await fetch('/AIagent/chat/', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     'X-CSRFToken': csrftoken
                 },
+                credentials: 'include',
                 body: JSON.stringify({
-                    message: message
+                    message: message,
+                    session_id: sessionId 
                 })
             });
             
             const data = await response.json();
             console.log('收到响应:', data);
-            
+            console.log('响应中的对话计数:', data.conversation_count);
             // 更新session信息
             if (data.session_id) {
                 sessionId = data.session_id;

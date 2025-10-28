@@ -1,21 +1,14 @@
 # epigenicai_app/views.py
+"""
+优化后的Django视图 - 纯粹的Web层和Session管理
+"""
 import json
 import asyncio
+from datetime import datetime
 from django.shortcuts import render
 from django.http import JsonResponse, HttpResponse
 from django.views.decorators.csrf import csrf_exempt
-
-# 全局Agent实例（避免重复创建）
-_control_agent = None
-
-def get_control_agent():
-    """获取Control Agent单例"""
-    global _control_agent
-    if _control_agent is None:
-        from agent_core.agents.control_agent import ControlAgent
-        _control_agent = ControlAgent()
-    return _control_agent
-
+from threading import Thread
 
 def AIagent_view(request):
     """AI助手主页面视图"""
@@ -25,223 +18,281 @@ def AIagent_view(request):
         return HttpResponse("Method not allowed", status=405)
 
 
+
+@csrf_exempt
 def AIagent_chat(request):
-    """处理AI对话请求的API视图 - 支持多轮对话"""
-    if request.method == 'POST':
-        try:
-            # 解析请求数据
-            data = json.loads(request.body)
-            message = data.get('message', '').strip()
+    """
+    支持普通对话 + 异步后台分析任务
+    """
+    if request.method != 'POST':
+        return JsonResponse({'status': 'error', 'message': 'Method not allowed'}, status=405)
 
-            if not message:
-                return JsonResponse({
-                    'status': 'error',
-                    'message': '消息不能为空'
-                }, status=400)
+    try:
+        # 1️⃣ 解析请求
+        data = json.loads(request.body)
+        message = data.get('message', '').strip()
+        if not message:
+            return JsonResponse({'status': 'error', 'message': '消息不能为空'}, status=400)
 
-            # 获取或创建session_id
-            if not request.session.session_key:
-                request.session.create()
-            session_id = request.session.session_key
+        # 2️⃣ Session 与上下文
+        if not request.session.session_key:
+            request.session.create()
+        session_key = request.session.session_key
 
-            # 准备上下文（包含Django session中的信息）
-            context = {
-                'user_ip': request.META.get('REMOTE_ADDR'),
-                'user_agent': request.META.get('HTTP_USER_AGENT'),
-                'django_session_data': dict(request.session),
-            }
+        messages_history = request.session.get('messages', [])
+        messages_history.append({"role": "user", "content": message})
 
-            try:
-                # 获取Agent实例
-                agent = get_control_agent()
+        context = {
+            'session_id': session_key,
+            'current_gene': request.session.get('current_gene'),
+            'task_id': request.session.get('task_id'),
+            'task_start_time': request.session.get('task_start_time'),
+        }
 
-                # 使用异步运行器来调用异步方法
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                
+        # 3️⃣ 创建 agent 并同步分析一次（看看用户说的内容属于哪类任务）
+        from agent_core.agents.control_agent import ControlAgent
+        agent = ControlAgent()
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(agent.process_message(message, messages_history, context))
+        loop.close()
+
+        # 更新消息历史（先加上回复）
+        if result.get("message_to_add"):
+            messages_history.append(result["message_to_add"])
+        else:
+            messages_history.append({"role": "assistant", "content": result.get("message", "")})
+        request.session["messages"] = messages_history
+        request.session.modified = True
+        request.session.save()
+
+        # 4️⃣ 如果是后台分析任务，就开线程执行（不阻塞主线程）
+        if result.get("type") == "analyzing":
+            gene = result.get("gene")
+            task_id = result.get("task_id", f"{gene}_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+            request.session["task_id"] = task_id
+            request.session["current_gene"] = gene
+            request.session["task_start_time"] = datetime.now().isoformat()
+            request.session.save()
+
+            def run_background_analysis():
                 try:
-                    # 调用异步的process_message方法，传递上下文
-                    result = loop.run_until_complete(
-                        agent.process_message(message, session_id, context)
-                    )
-                finally:
-                    loop.close()
+                    asyncio.run(agent._run_analysis(gene, task_id))
+                except Exception as e:
+                    print(f"[Thread] 后台分析出错: {e}")
+                    agent.cache_set(f"task_status_{task_id}", f"error: {e}")
 
-                # 从返回的字典中提取信息
-                response_text = result.get('message', '抱歉，无法处理您的请求')
-                
-                # 构建完整的响应
-                response_data = {
-                    'status': 'success',
-                    'response': response_text,
-                    'session_id': session_id  # 返回session_id供前端参考
-                }
-                
-                # 添加额外信息
-                if result.get('genes'):
-                    response_data['genes'] = result['genes']
-                
-                if result.get('confidence'):
-                    response_data['confidence'] = result['confidence']
-                
-                if result.get('state'):
-                    response_data['analysis_state'] = result['state']
-                
-                if result.get('task_started'):
-                    response_data['task_started'] = True
-                
-                # 获取对话历史数量（用于前端显示）
-                conversation_history = agent.get_conversation_history(session_id)
-                response_data['conversation_count'] = len(conversation_history)
+            Thread(target=run_background_analysis, daemon=True).start()
 
-            except ImportError as e:
-                print(f"导入Agent错误: {str(e)}")
-                response_text = "AI助手模块未正确配置，请联系管理员"
-                response_data = {
-                    'status': 'error',
-                    'response': response_text
-                }
-                
-            except Exception as e:
-                print(f"Agent处理错误: {str(e)}")
-                import traceback
-                traceback.print_exc()
-                
-                # 使用备用响应
-                response_text = get_fallback_response(message)
-                response_data = {
-                    'status': 'success',
-                    'response': response_text
-                }
+        response_data = {
+            "status": 'success',
+            "response": result.get("message", ""),
+            "conversation_count": len(messages_history),
+            'type': result.get('type', 'chat'),
+            "session_id": session_key
+        }
 
-            return JsonResponse(response_data)
+        if result.get("gene"):
+            response_data["gene"] = result["gene"]
+        if result.get("confidence"):
+            response_data["confidence"] = result["confidence"]
 
-        except json.JSONDecodeError:
-            return JsonResponse({
-                'status': 'error',
-                'message': '无效的JSON数据'
-            }, status=400)
-            
-        except Exception as e:
-            print(f"处理请求时出错: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            
-            return JsonResponse({
-                'status': 'error',
-                'message': '服务器内部错误',
-                'details': str(e)
-            }, status=500)
+        return JsonResponse(response_data)
 
-    else:
-        return JsonResponse({
-            'status': 'error',
-            'message': 'Method not allowed'
-        }, status=405)
+    except Exception as e:
+        print(f"[Error] 处理请求失败: {e}")
+        import traceback; traceback.print_exc()
+        return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
+
 
 
 def AIagent_history(request):
-    """获取对话历史API"""
-    if request.method == 'GET':
-        try:
-            # 获取session_id
-            session_id = request.session.session_key
-            if not session_id:
-                return JsonResponse({
-                    'status': 'success',
-                    'history': [],
-                    'message': '没有对话历史'
-                })
-            
-            # 获取Agent实例和历史
-            agent = get_control_agent()
-            history = agent.get_conversation_history(session_id)
-            
-            return JsonResponse({
-                'status': 'success',
-                'history': history,
-                'count': len(history)
-            })
-            
-        except Exception as e:
-            print(f"获取历史时出错: {str(e)}")
-            return JsonResponse({
-                'status': 'error',
-                'message': '获取历史失败'
-            }, status=500)
-    else:
+    """获取对话历史"""
+    if request.method != 'GET':
         return JsonResponse({
             'status': 'error',
             'message': 'Method not allowed'
         }, status=405)
+    
+    try:
+        # 获取对话历史
+        messages = request.session.get('messages', [])
+        
+        # 格式化历史（方便前端展示）
+        formatted_history = []
+        for msg in messages:
+            formatted_history.append({
+                'role': msg['role'],
+                'content': msg['content'],
+                'timestamp': msg.get('timestamp', '')
+            })
+        
+        return JsonResponse({
+            'status': 'success',
+            'history': formatted_history,
+            'count': len(formatted_history),
+            'current_gene': request.session.get('current_gene'),
+            'task_id': request.session.get('task_id')
+        })
+        
+    except Exception as e:
+        print(f"获取历史记录失败: {str(e)}")
+        return JsonResponse({
+            'status': 'error',
+            'message': '获取历史记录失败'
+        }, status=500)
 
 
 def AIagent_clear(request):
-    """清空对话历史API"""
-    if request.method == 'POST':
-        try:
-            # 获取session_id
-            session_id = request.session.session_key
-            if session_id:
-                # 清空Agent中的会话
-                agent = get_control_agent()
-                agent.clear_session(session_id)
-                
-                # 清空Django session中的数据
-                request.session.flush()
-                
-            return JsonResponse({
-                'status': 'success',
-                'message': '对话历史已清空'
-            })
-            
-        except Exception as e:
-            print(f"清空历史时出错: {str(e)}")
-            return JsonResponse({
-                'status': 'error',
-                'message': '清空历史失败'
-            }, status=500)
-    else:
+    """清空对话历史和重置会话"""
+    if request.method != 'POST':
         return JsonResponse({
             'status': 'error',
             'message': 'Method not allowed'
         }, status=405)
-
-
-def get_fallback_response(message):
-    """备用响应生成器"""
-    message_lower = message.lower()
     
-    # 基因相关的备用响应
-    if any(keyword in message_lower for keyword in ['基因', 'gene', '分析', '靶点']):
-        return """我理解您想进行基因分析。请告诉我：
+    try:
+        # 清空所有session数据
+        session_keys_to_clear = [
+            'messages',
+            'current_gene',
+            'task_id',
+            'task_start_time'
+        ]
+        
+        for key in session_keys_to_clear:
+            request.session.pop(key, None)
+        
+        request.session.modified = True
+        request.session.save()
+        
+        return JsonResponse({
+            'status': 'success',
+            'message': '对话历史已清空，可以开始新的分析'
+        })
+        
+    except Exception as e:
+        print(f"清空对话历史失败: {str(e)}")
+        return JsonResponse({
+            'status': 'error',
+            'message': '清空失败',
+            'details': str(e) if request.GET.get('debug') else None
+        }, status=500)
 
-1. 您想分析哪个基因？（例如：TP53, EGFR, BRCA1等）
-2. 您关注的疾病领域是什么？
-3. 您需要什么类型的分析？（靶点评估、药物开发潜力、专利分析等）
 
-我会基于我们的对话历史，为您提供个性化的分析报告。"""
+def AIagent_status(request):
+    """检查分析任务状态"""
+    if request.method != 'GET':
+        return JsonResponse({
+            'status': 'error',
+            'message': 'Method not allowed'
+        }, status=405)
     
-    # CRISPR相关的备用响应
-    elif any(keyword in message_lower for keyword in ['crispr', 'cas9', 'sgrna', '编辑']):
-        return """您提到了基因编辑技术。基于我们之前的讨论，我可以帮您：
+    try:
+        task_id = request.session.get('task_id')
+        
+        if not task_id:
+            return JsonResponse({
+                'status': 'success',
+                'task_status': 'no_task',
+                'message': '没有正在运行的任务'
+            })
+        
+        # 使用Agent的缓存方法获取任务状态
+        from agent_core.agents.control_agent import ControlAgent
+        agent = ControlAgent()
+        task_status = agent.cache_get(f"task_status_{task_id}")
+        
+        response_data = {
+            'status': 'success',
+            'task_id': task_id,
+            'task_status': task_status or 'unknown',
+            'current_gene': request.session.get('current_gene')
+        }
+        
+        # 如果任务完成，检查是否有报告
+        if task_status == 'completed':
+            gene = request.session.get('current_gene')
+            if gene:
+                report = agent.get_cached_report(gene)
+                if report:
+                    response_data['report_url'] = report.get('report_url')
+                    response_data['generated_at'] = report.get('generated_at')
+        
+        return JsonResponse(response_data)
+        
+    except Exception as e:
+        print(f"检查任务状态失败: {str(e)}")
+        return JsonResponse({
+            'status': 'error',
+            'message': '检查状态失败'
+        }, status=500)
 
-• 设计sgRNA序列
-• 评估脱靶效应
-• 优化编辑效率
-• 分析编辑结果
 
-请告诉我具体的需求，我会结合之前的内容为您提供帮助。"""
+def AIagent_refresh_cache(request):
+    """强制刷新基因分析缓存"""
+    if request.method != 'POST':
+        return JsonResponse({
+            'status': 'error',
+            'message': 'Method not allowed'
+        }, status=405)
     
-    # 默认响应
-    else:
-        return """我是您的AI基因分析助手。我记得我们之前的对话内容，可以继续为您服务。
+    try:
+        data = json.loads(request.body)
+        gene = data.get('gene')
+        
+        if not gene:
+            return JsonResponse({
+                'status': 'error',
+                'message': '请提供基因名称'
+            }, status=400)
+        
+        # 使用Agent的方法清除缓存
+        from agent_core.agents.control_agent import ControlAgent
+        agent = ControlAgent()
+        success = agent.clear_gene_cache(gene)
+        
+        if success:
+            return JsonResponse({
+                'status': 'success',
+                'message': f'{gene}基因的缓存已清除，下次分析将重新生成报告'
+            })
+        else:
+            return JsonResponse({
+                'status': 'error',
+                'message': '清除缓存失败'
+            }, status=500)
+        
+    except Exception as e:
+        print(f"清除缓存失败: {str(e)}")
+        return JsonResponse({
+            'status': 'error',
+            'message': '清除缓存失败'
+        }, status=500)
 
-我可以帮您：
-• **基因靶点分析** - 评估基因作为药物靶点的潜力
-• **文献调研** - 搜索和分析相关研究文献  
-• **专利分析** - 查询基因相关专利信息
-• **药物开发评估** - 分析成药性和市场前景
-• **CRISPR设计** - 协助基因编辑实验设计
 
-您可以继续之前的话题，或告诉我新的分析需求。"""
+def AIagent_cache_status(request):
+    """获取缓存状态信息（新增）"""
+    if request.method != 'GET':
+        return JsonResponse({
+            'status': 'error',
+            'message': 'Method not allowed'
+        }, status=405)
+    
+    try:
+        from agent_core.agents.control_agent import ControlAgent
+        agent = ControlAgent()
+        cache_status = agent.get_cache_status()
+        
+        return JsonResponse({
+            'status': 'success',
+            'cache_info': cache_status
+        })
+        
+    except Exception as e:
+        print(f"获取缓存状态失败: {str(e)}")
+        return JsonResponse({
+            'status': 'error',
+            'message': '获取缓存状态失败'
+        }, status=500)

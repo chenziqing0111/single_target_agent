@@ -1,37 +1,25 @@
 """
-Control Agent - 用户交互和流程控制（支持多轮对话+LLM提取基因+LangGraph分析）
+Control Agent - 无状态的基因分析控制器（自管理缓存）
 """
 import asyncio
-import re
-from typing import Dict, Optional, List, Any
-from datetime import datetime
-from dataclasses import dataclass, field
 import json
+import os
+import pickle
+from typing import Dict, List, Optional, Any
+from datetime import datetime
 from openai import OpenAI
+import threading
 
-@dataclass
-class SessionState:
-    """增强的会话状态（支持多轮对话）"""
-    session_id: str
-    state: str = "init"  # init/waiting_confirm/analyzing/completed/error
-    gene: Optional[str] = None
-    genes: List[str] = field(default_factory=list)  # 历史提到的所有基因
-    report: Optional[str] = None
-    report_url: Optional[str] = None
-    error: Optional[str] = None
-    timestamp: Optional[datetime] = None
-    created_at: datetime = field(default_factory=datetime.now)
-    updated_at: datetime = field(default_factory=datetime.now)
-    # 多轮对话支持
-    messages: List[Dict[str, str]] = field(default_factory=list)  # 对话历史
-    context: Dict[str, Any] = field(default_factory=dict)  # 额外上下文
 
 class ControlAgent:
-    """控制Agent - 处理用户交互、多轮对话和调度分析流程"""
+    """无状态的Control Agent - 自管理缓存"""
+    
+    # 类级别的缓存（所有实例共享）
+    _cache_store = {}
+    _cache_dir = "agent_cache"
     
     def __init__(self, config=None):
         self.config = config or {}
-        self.sessions: Dict[str, SessionState] = {}
         self.graph_runner = None
         
         # 初始化LLM客户端
@@ -39,311 +27,400 @@ class ControlAgent:
             api_key=self.config.get('openai_api_key', 'sk-9b3ad78d6d51431c90091b575072e62f'),
             base_url=self.config.get('openai_base_url', 'https://api.deepseek.com')
         )
+        
+        # 初始化缓存目录
+        self._init_cache_dir()
     
-    def get_or_create_session(self, session_id: str) -> SessionState:
-        """获取或创建会话"""
-        if session_id not in self.sessions:
-            self.sessions[session_id] = SessionState(session_id=session_id)
-        return self.sessions[session_id]
+    def _init_cache_dir(self):
+        """初始化缓存目录"""
+        if not os.path.exists(self._cache_dir):
+            os.makedirs(self._cache_dir, exist_ok=True)
+            print(f"[Control Agent] 创建缓存目录: {self._cache_dir}")
     
-    async def extract_gene_name(self, text: str, context: List[Dict] = None) -> Dict[str, Any]:
+    # ========== 缓存管理方法 ==========
+    def cache_set(self, key: str, value: Any, timeout: int = 3600) -> bool:
         """
-        使用LLM从用户输入中提取基因名（支持上下文）
+        设置缓存
         
         Args:
-            text: 用户输入
-            context: 对话历史上下文
+            key: 缓存键
+            value: 缓存值
+            timeout: 过期时间（秒），默认1小时
+        """
+        try:
+            # 内存缓存
+            self._cache_store[key] = {
+                'value': value,
+                'expire_at': datetime.now().timestamp() + timeout if timeout else None
+            }
+            
+            # 同时持久化到文件（可选）
+            if self.config.get('persistent_cache', True):
+                cache_file = os.path.join(self._cache_dir, f"{key}.cache")
+                with open(cache_file, 'wb') as f:
+                    pickle.dump(self._cache_store[key], f)
+            
+            print(f"[Cache] 设置缓存: {key}")
+            return True
+            
+        except Exception as e:
+            print(f"[Cache] 设置缓存失败: {e}")
+            return False
+    
+    def cache_get(self, key: str, default: Any = None) -> Any:
+        """
+        获取缓存
+        
+        Args:
+            key: 缓存键
+            default: 默认值
+        """
+        try:
+            # 先尝试内存缓存
+            if key in self._cache_store:
+                cache_data = self._cache_store[key]
+                # 检查是否过期
+                if cache_data['expire_at'] and datetime.now().timestamp() > cache_data['expire_at']:
+                    print(f"[Cache] 缓存已过期: {key}")
+                    del self._cache_store[key]
+                    return default
+                print(f"[Cache] 命中内存缓存: {key}")
+                return cache_data['value']
+            
+            # 尝试从文件加载
+            if self.config.get('persistent_cache', True):
+                cache_file = os.path.join(self._cache_dir, f"{key}.cache")
+                if os.path.exists(cache_file):
+                    with open(cache_file, 'rb') as f:
+                        cache_data = pickle.load(f)
+                        # 检查是否过期
+                        if cache_data['expire_at'] and datetime.now().timestamp() > cache_data['expire_at']:
+                            print(f"[Cache] 文件缓存已过期: {key}")
+                            os.remove(cache_file)
+                            return default
+                        # 加载到内存
+                        self._cache_store[key] = cache_data
+                        print(f"[Cache] 命中文件缓存: {key}")
+                        return cache_data['value']
+            
+            print(f"[Cache] 未命中: {key}")
+            return default
+            
+        except Exception as e:
+            print(f"[Cache] 获取缓存失败: {e}")
+            return default
+    
+    def cache_delete(self, key: str) -> bool:
+        """删除缓存"""
+        try:
+            # 删除内存缓存
+            if key in self._cache_store:
+                del self._cache_store[key]
+            
+            # 删除文件缓存
+            cache_file = os.path.join(self._cache_dir, f"{key}.cache")
+            if os.path.exists(cache_file):
+                os.remove(cache_file)
+            
+            print(f"[Cache] 删除缓存: {key}")
+            return True
+            
+        except Exception as e:
+            print(f"[Cache] 删除缓存失败: {e}")
+            return False
+    
+    def cache_clear(self) -> bool:
+        """清空所有缓存"""
+        try:
+            # 清空内存
+            self._cache_store.clear()
+            
+            # 清空文件
+            if os.path.exists(self._cache_dir):
+                for file in os.listdir(self._cache_dir):
+                    if file.endswith('.cache'):
+                        os.remove(os.path.join(self._cache_dir, file))
+            
+            print("[Cache] 清空所有缓存")
+            return True
+            
+        except Exception as e:
+            print(f"[Cache] 清空缓存失败: {e}")
+            return False
+    
+    async def process_message(self, message: str, messages_history: List[Dict], context: Dict = None) -> Dict:
+        """
+        处理用户消息（无状态）
+        
+        Args:
+            message: 用户新消息
+            messages_history: 完整的对话历史（DeepSeek格式）
+            context: 额外上下文（如task_id等）
             
         Returns:
-            提取结果字典
+            响应字典，包含回复和动作
         """
-        # 构建上下文提示
-        context_prompt = ""
-        if context and len(context) > 0:
-            recent_genes = set()
-            for msg in context[-6:]:  # 最近3轮对话
-                if msg.get("genes"):
-                    recent_genes.update(msg.get("genes", []))
-            if recent_genes:
-                context_prompt = f"\n上下文：之前讨论过的基因包括：{', '.join(recent_genes)}"
+        # 构建完整的消息列表（包含新消息）
+        messages = messages_history
+        messages.append({"role": "user", "content": message})
         
-        prompt = f"""你是一个生物医学专家，擅长识别基因名称。
-
-任务：从用户输入中提取基因名称。{context_prompt}
-
-注意：
-1. 基因名通常是大写字母和数字的组合，如：IL17RA, PCSK9, PD-1, EGFR, TNF-α等
-2. 有些基因名包含连字符，如：PD-1, PD-L1, HER-2
-3. 有些基因名包含希腊字母，如：TNF-α, IFN-γ
-4. 要区分基因名和普通缩写（如OK, YES, NO, API等）
-5. 如果用户提到多个基因，都要提取出来
-6. 如果用户说"它"、"这个基因"等代词，结合上下文判断是否指之前提到的基因
-
-用户输入："{text}"
-
-请以JSON格式返回：
-{{
-    "has_gene": true/false,
-    "genes": ["基因1", "基因2"],  // 如果没有则为空列表
-    "confidence": 0.0-1.0,  // 置信度
-    "explanation": "简短说明"  // 如"检测到IL17RA基因"或"未发现基因名称"
-}}
-
-只返回JSON，不要其他内容。"""
+        # 使用LLM分析当前状态和意图
+        analysis = await self.analyze_conversation(messages, context)
         
+        # 根据分析结果执行相应动作
+        response = await self.execute_action(analysis, context)
+        
+        # 添加助手回复到消息历史
+        response['message_to_add'] = {
+            "role": "assistant",
+            "content": response['message']
+        }
+        
+        return response
+    
+    async def analyze_conversation(self, messages: List[Dict], context: Dict = None) -> Dict:
+        """
+        使用LLM分析对话状态和用户意图
+        
+        Returns:
+            分析结果字典
+        """
+        system_prompt = """你是一个基因分析助手，帮助用户分析基因靶点。
+
+基于对话历史，分析当前状态并决定下一步动作。
+
+分析要点：
+1. 识别用户提到的基因名（如IL17RA, PCSK9, PD-1等）
+2. 判断对话处于什么阶段：
+   - 初始阶段：用户刚开始对话或询问
+   - 基因识别：用户提到了基因名，需要确认
+   - 等待确认：已经询问用户是否分析，等待确认
+   - 已确认：用户确认要分析
+   - 分析中：正在进行分析
+   - 已完成：分析已完成
+3. 判断用户意图：
+   - 想分析新基因
+   - 确认/拒绝分析
+   - 询问进度
+   - 查看结果
+   - 闲聊
+
+返回JSON格式：
+{
+    "current_stage": "初始阶段|基因识别|等待确认|已确认|分析中|已完成",
+    "user_intent": "分析基因|确认|拒绝|查询进度|查看结果|闲聊|其他",
+    "genes_mentioned": ["基因1", "基因2"],
+    "is_confirmation": true/false,
+    "is_rejection": true/false,
+    "current_gene": "正在处理的基因名",
+    "next_action": "request_gene|confirm_gene|start_analysis|show_progress|show_results|chat",
+    "confidence": 0.0-1.0
+}"""
+
         try:
             response = self.llm_client.chat.completions.create(
                 model="deepseek-chat",
                 messages=[
-                    {"role": "system", "content": "你是生物医学专家，精确识别基因名称。"},
-                    {"role": "user", "content": prompt}
+                    {"role": "system", "content": system_prompt},
+                    *messages  # 展开完整对话历史
                 ],
                 temperature=0.1,
-                max_tokens=200
+                max_tokens=500,
+                response_format={"type": "json_object"}
             )
             
-            content = response.choices[0].message.content.strip()
+            analysis = json.loads(response.choices[0].message.content)
             
-            # 清理markdown标记
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0]
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0]
+            # 添加context中的信息
+            if context:
+                if context.get('current_gene'):
+                    analysis['current_gene'] = context['current_gene']
+                if context.get('task_id'):
+                    analysis['task_id'] = context['task_id']
             
-            result = json.loads(content)
-            
-            return {
-                "has_gene": result.get("has_gene", False),
-                "genes": result.get("genes", []),
-                "confidence": result.get("confidence", 0.0),
-                "explanation": result.get("explanation", "")
-            }
+            print(f"[Control Agent] 分析结果: {analysis}")
+            return analysis
             
         except Exception as e:
-            print(f"[Control Agent] LLM基因提取失败: {e}")
-            return self._fallback_gene_extraction(text)
+            print(f"[Control Agent] LLM分析失败: {e}")
+            # 返回默认分析结果
+            return {
+                "current_stage": "初始阶段",
+                "user_intent": "其他",
+                "genes_mentioned": [],
+                "next_action": "request_gene",
+                "error": str(e)
+            }
     
-    def _fallback_gene_extraction(self, text: str) -> Dict[str, Any]:
-        """备用的简单基因提取（当LLM失败时）"""
-        pattern = r'\b[A-Z][A-Z0-9]{1,10}(?:[-][A-Z0-9]+)?\b'
-        matches = re.findall(pattern, text.upper())
-        
-        non_genes = {'OK', 'YES', 'NO', 'API', 'HTML', 'PDF', 'URL', 'CSV'}
-        genes = [m for m in matches if m not in non_genes and (
-            any(c.isdigit() for c in m) or '-' in m or len(m) >= 3
-        )]
-        
-        return {
-            "has_gene": len(genes) > 0,
-            "genes": genes,
-            "confidence": 0.5,
-            "explanation": f"通过模式匹配找到: {', '.join(genes)}" if genes else "未找到基因名"
-        }
-    
-    def is_confirmation(self, text: str) -> bool:
-        """检查是否是确认词"""
-        confirm_words = [
-            '确认', '是', '好', '开始', 'ok', 'yes', 
-            '确定', '可以', '同意', '开始吧', '好的',
-            'start', 'begin', 'go', '没问题', '分析'
-        ]
-        text_lower = text.lower()
-        return any(word in text_lower for word in confirm_words)
-    
-    def is_rejection(self, text: str) -> bool:
-        """检查是否是拒绝词"""
-        reject_words = [
-            '不是', '否', '取消', 'no', 'cancel', 
-            '算了', '不用了', '等等', '停止', 'stop'
-        ]
-        text_lower = text.lower()
-        return any(word in text_lower for word in reject_words)
-    
-    async def process_message(self, message: str, session_id: str, context: Dict = None) -> Dict:
+    async def execute_action(self, analysis: Dict, context: Dict = None) -> Dict:
         """
-        处理用户消息（支持多轮对话）
+        根据分析结果执行动作
         
         Args:
-            message: 用户输入
-            session_id: 会话ID
-            context: 额外的上下文信息
+            analysis: LLM分析结果
+            context: 上下文信息
             
         Returns:
             响应字典
         """
-        # 获取或创建会话
-        session = self.get_or_create_session(session_id)
-        session.updated_at = datetime.now()
+        action = analysis.get('next_action', 'chat')
         
-        # 添加用户消息到历史
-        session.messages.append({
-            "role": "user",
-            "content": message,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        # 更新上下文
-        if context:
-            session.context.update(context)
-        
-        # 根据状态处理
-        if session.state == "init":
-            response = await self._handle_initial(message, session, session_id)
+        if action == 'request_gene':
+            return self._request_gene_input()
             
-        elif session.state == "waiting_confirm":
-            response = await self._handle_confirmation(message, session, session_id)
-            
-        elif session.state == "analyzing":
-            response = self._handle_analyzing(session)
-            
-        elif session.state == "completed":
-            response = await self._handle_completed(message, session, session_id)
-            
-        elif session.state == "error":
-            response = self._handle_error(session, session_id)
-        
-        else:
-            session.state = "init"
-            response = await self._handle_initial(message, session, session_id)
-        
-        # 添加助手响应到历史
-        session.messages.append({
-            "role": "assistant",
-            "content": response.get("message", ""),
-            "timestamp": datetime.now().isoformat(),
-            "genes": response.get("genes", [])
-        })
-        
-        # 限制历史长度
-        if len(session.messages) > 30:
-            session.messages = session.messages[-30:]
-        
-        return response
-    
-    async def _handle_initial(self, message: str, session: SessionState, session_id: str) -> Dict:
-        """处理初始状态（支持多轮对话上下文）"""
-        
-        # 使用LLM提取基因名，传入历史上下文
-        extraction = await self.extract_gene_name(message, session.messages)
-        
-        print(f"[Control Agent] 基因提取结果: {extraction}")
-        
-        # 检查是否在询问之前的基因
-        message_lower = message.lower()
-        if any(word in message_lower for word in ['之前', '刚才', '上次', '那个基因']):
-            if session.genes:
-                # 有历史基因记录
-                return {
-                    "type": "recall",
-                    "message": f"""我记得之前讨论过以下基因：
-{chr(10).join(['• ' + g for g in session.genes])}
-
-您想继续分析哪个基因？或者要分析新的基因？""",
-                    "genes": session.genes,
-                    "status": "waiting_selection"
-                }
-        
-        if not extraction["has_gene"]:
-            # 根据对话历史调整响应
-            if len(session.messages) > 2:
-                # 有对话历史
-                return {
-                    "type": "need_gene",
-                    "message": """我需要知道您想分析的基因名称。
-
-请直接告诉我基因名，例如：
-• IL17RA、PCSK9、PD-1
-• EGFR、BRCA1、TP53
-
-或者继续我们之前的讨论？""",
-                    "status": "waiting_input"
-                }
+        elif action == 'confirm_gene':
+            genes = analysis.get('genes_mentioned', [])
+            if len(genes) == 1:
+                return self._confirm_gene_analysis(genes[0], analysis.get('confidence', 0.8))
+            elif len(genes) > 1:
+                return self._handle_multiple_genes(genes)
             else:
-                # 首次对话
-                return {
-                    "type": "need_gene",
-                    "message": """😊 您好！我是靶点分析助手。
-                    
+                return self._request_gene_input()
+                
+        elif action == 'start_analysis':
+            gene = analysis.get('current_gene')
+            if not gene and analysis.get('genes_mentioned'):
+                gene = analysis['genes_mentioned'][0]
+            
+            if gene:
+                # 检查缓存
+                cached_report = await self._check_cache(gene)
+                if cached_report:
+                    return self._return_cached_report(gene, cached_report)
+                
+                # 启动新分析
+                task_id = self._start_analysis_task(gene, context)
+                return self._analysis_started(gene, task_id)
+            else:
+                return self._request_gene_input()
+                
+        elif action == 'show_progress':
+            return await self._check_analysis_progress(context)
+            
+        elif action == 'show_results':
+            return await self._show_results(context)
+            
+        else:
+            # 默认聊天响应
+            return self._chat_response(analysis)
+    
+    def _request_gene_input(self) -> Dict:
+        """请求用户输入基因名"""
+        return {
+            "type": "need_gene",
+            "message": """😊 您好！我是靶点分析助手。
+
 请告诉我您想要分析的基因名称，例如：
 • IL17RA（炎症相关靶点）
-• PCSK9（降脂靶点）
+• PCSK9（降脂靶点）  
 • PD-1 或 PD-L1（免疫检查点）
 • EGFR（肿瘤靶点）
 • TNF-α（炎症因子）
 
 请输入一个基因名称：""",
-                    "status": "waiting_input"
-                }
+            "status": "waiting_input"
+        }
+    
+    def _confirm_gene_analysis(self, gene: str, confidence: float) -> Dict:
+        """确认基因分析"""
+        confidence_msg = ""
+        if confidence < 0.8:
+            confidence_msg = f"\n（识别置信度：{confidence:.0%}，如有误请重新输入）"
         
-        elif len(extraction["genes"]) > 1:
-            # 多个基因
-            gene_list = '\n'.join([f"• {g}" for g in extraction["genes"]])
-            # 更新会话基因列表
-            session.genes.extend(extraction["genes"])
-            session.genes = list(set(session.genes))
-            
-            return {
-                "type": "multiple_genes",
-                "message": f"""检测到多个基因：
-{gene_list}
-
-目前系统支持单个基因的深度分析。
-请选择您最想分析的基因名称，或回复"第一个"。""",
-                "genes": extraction["genes"],
-                "status": "waiting_selection",
-                "confidence": extraction["confidence"]
-            }
-        
-        else:
-            # 单个基因
-            gene = extraction["genes"][0]
-            session.gene = gene
-            session.genes.append(gene)
-            session.genes = list(set(session.genes))
-            session.state = "waiting_confirm"
-            
-            # 根据历史调整消息
-            history_msg = ""
-            if len(session.messages) > 4:
-                history_msg = "\n\n基于我们之前的讨论，我会特别关注您感兴趣的方面。"
-            
-            confidence_msg = ""
-            if extraction["confidence"] < 0.8:
-                confidence_msg = f"\n（识别置信度：{extraction['confidence']:.0%}，如有误请重新输入）"
-            
-            return {
-                "type": "confirm",
-                "message": f"""🎯 准备为您分析 **{gene}** 基因{confidence_msg}
+        return {
+            "type": "confirm",
+            "message": f"""🎯 准备为您分析 **{gene}** 基因{confidence_msg}
 
 将为您生成包含以下内容的深度调研报告：
 
 📚 **文献研究**：疾病机制、治疗策略、靶点价值
-🔬 **临床进展**：全球临床试验现状与关键数据
-💡 **专利分析**：技术路线、竞争格局、创新趋势  
-💰 **商业评估**：市场规模、竞争格局、投资价值{history_msg}
+🔬 **临床进展**：全球临床试验现状与关键数据  
+💡 **专利分析**：技术路线、竞争格局、创新趋势
+💰 **商业评估**：市场规模、竞争格局、投资价值
 
 ⏱️ 预计分析时间：5-10分钟
 
 确认开始分析请回复"确认"，或输入其他基因名称。""",
-                "gene": gene,
-                "status": "waiting_confirmation",
-                "confidence": extraction["confidence"]
-            }
+            "gene": gene,
+            "status": "waiting_confirmation",
+            "confidence": confidence
+        }
     
-    async def _handle_confirmation(self, message: str, session: SessionState, session_id: str) -> Dict:
-        """处理确认状态"""
+    def _handle_multiple_genes(self, genes: List[str]) -> Dict:
+        """处理多个基因的情况"""
+        gene_list = '\n'.join([f"• {g}" for g in genes])
+        return {
+            "type": "multiple_genes",
+            "message": f"""检测到多个基因：
+{gene_list}
+
+目前系统支持单个基因的深度分析。
+请选择您最想分析的基因名称。""",
+            "genes": genes,
+            "status": "waiting_selection"
+        }
+    
+    async def _check_cache(self, gene: str) -> Optional[Dict]:
+        """检查是否有缓存的报告"""
+        # 生成缓存key（基因名+年月）
+        cache_key = f"gene_report_{gene}_{datetime.now().strftime('%Y-%m')}"
         
-        if self.is_confirmation(message):
-            # 用户确认，开始分析
-            session.state = "analyzing"
-            session.timestamp = datetime.now()
-            
-            # 异步启动分析（重要：调用LangGraph）
-            asyncio.create_task(self._run_analysis(session_id))
-            
-            return {
-                "type": "analyzing",
-                "message": f"""🚀 开始分析 {session.gene} 基因
+        # 使用自己的缓存方法
+        cached = self.cache_get(cache_key)
+        if cached:
+            print(f"[Control Agent] 找到缓存报告: {gene}")
+            return cached
+        
+        return None
+    
+    def _return_cached_report(self, gene: str, cached_report: Dict) -> Dict:
+        """返回缓存的报告"""
+        return {
+            "type": "cached_result",
+            "message": f"""✅ 找到 {gene} 基因的最新分析报告！
+
+📅 生成时间：{cached_report.get('generated_at', '最近')}
+📄 报告链接：{cached_report.get('report_url', '#')}
+
+这是本月最新的分析报告，包含最新的研究进展和临床数据。
+
+您可以：
+• 查看完整报告
+• 分析其他基因
+• 如需重新生成，请说"强制刷新" """,
+            "gene": gene,
+            "report_url": cached_report.get('report_url'),
+            "from_cache": True,
+            "status": "completed"
+        }
+    
+    def _start_analysis_task(self, gene: str, context: Dict = None) -> str:
+        """启动分析任务"""
+        # 生成任务ID
+        task_id = f"{gene}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        print(f"[Control Agent] 启动分析任务: {gene} (ID: {task_id})")
+        
+        # 缓存任务状态（让status接口立刻可查）
+        self.cache_set(f"task_status_{task_id}", "running", timeout=3600)
+
+        #定义一个任务函数，让它自己建 event loop 并运行异步逻辑
+        def run_in_thread():
+            try:
+                asyncio.run(self._run_analysis(gene, task_id))
+            except Exception as e:
+                print(f"[Control Agent] 后台任务失败: {e}")
+                self.cache_set(f"task_status_{task_id}", f"error: {e}", timeout=3600)
+
+        # 启动后台线程（daemon=True：不会阻塞Django退出）
+        threading.Thread(target=run_in_thread, daemon=True).start()
+
+        return task_id
+    
+    def _analysis_started(self, gene: str, task_id: str) -> Dict:
+        """分析已启动的响应"""
+        return {
+            "type": "analyzing",
+            "message": f"""🚀 开始分析 {gene} 基因
 
 正在执行以下步骤：
 • 文献调研分析中...
@@ -351,223 +428,251 @@ class ControlAgent:
 • 专利信息检索中...
 • 商业价值评估中...
 
-请稍候，分析完成后会自动展示报告...""",
-                "gene": session.gene,
-                "status": "analyzing",
-                "task_started": True
-            }
-            
-        elif self.is_rejection(message):
-            # 用户拒绝
-            session.state = "init"
-            return {
-                "type": "cancelled",
-                "message": "已取消分析。请输入新的基因名称，或告诉我您的需求。",
-                "status": "waiting_input"
-            }
-            
-        else:
-            # 可能是新的基因名
-            extraction = await self.extract_gene_name(message, session.messages)
-            if extraction["has_gene"] and len(extraction["genes"]) == 1:
-                # 切换到新基因
-                session.gene = extraction["genes"][0]
-                session.genes.append(session.gene)
-                session.genes = list(set(session.genes))
-                session.state = "init"
-                return await self._handle_initial(message, session, session_id)
-            else:
-                return {
-                    "type": "need_confirmation",
-                    "message": f"""当前准备分析：**{session.gene}**
-                    
-请回复"确认"开始分析，或输入新的基因名称。""",
-                    "gene": session.gene,
-                    "status": "waiting_confirmation"
-                }
-    
-    async def _handle_completed(self, message: str, session: SessionState, session_id: str) -> Dict:
-        """处理完成状态"""
-        # 检查是否要分析新基因
-        extraction = await self.extract_gene_name(message, session.messages)
-        if extraction["has_gene"]:
-            session.state = "init"
-            return await self._handle_initial(message, session, session_id)
-        
-        # 检查是否询问其他基因
-        if "其他" in message or "还有" in message:
-            other_genes = [g for g in session.genes if g != session.gene]
-            if other_genes:
-                return {
-                    "type": "suggest",
-                    "message": f"""✅ {session.gene} 分析已完成！
-
-您还查询过这些基因：
-{chr(10).join(['• ' + g for g in other_genes])}
-
-需要分析其中的某个基因吗？""",
-                    "genes": other_genes,
-                    "report_url": session.report_url,
-                    "status": "completed"
-                }
-        
-        return {
-            "type": "completed",
-            "message": f"""✅ {session.gene} 基因分析完成！
-
-报告已生成：{session.report_url}
-
-您可以：
-• 输入新的基因名称进行分析
-• 下载当前报告查看详细内容
-• 询问关于该基因的具体问题""",
-            "report_url": session.report_url,
-            "status": "completed"
-        }
-    
-    def _handle_analyzing(self, session: SessionState) -> Dict:
-        """处理分析中状态"""
-        elapsed = (datetime.now() - session.timestamp).seconds if session.timestamp else 0
-        minutes = elapsed // 60
-        seconds = elapsed % 60
-        
-        return {
-            "type": "in_progress",
-            "message": f"""⏳ {session.gene} 基因分析进行中...
-
-已运行：{minutes}分{seconds}秒
-
-请耐心等待，分析完成后将自动展示报告。
-您也可以继续提问，我会在分析完成后回复。""",
-            "gene": session.gene,
+请稍候，我会在完成后通知您...""",
+            "gene": gene,
+            "task_id": task_id,
+            "task_started": True,
             "status": "analyzing"
         }
     
-    def _handle_error(self, session: SessionState, session_id: str) -> Dict:
-        """处理错误状态"""
-        session.state = "init"
+    async def _check_analysis_progress(self, context: Dict) -> Dict:
+        """检查分析进度"""
+        task_id = context.get('task_id')
+        gene = context.get('current_gene')
         
-        return {
-            "type": "error",
-            "message": f"""❌ 分析过程中出现错误
+        if not task_id:
+            return {
+                "type": "no_task",
+                "message": "当前没有正在运行的分析任务。请输入基因名称开始新的分析。",
+                "status": "waiting_input"
+            }
+        
+        # 使用自己的缓存检查任务状态
+        task_status = self.cache_get(f"task_status_{task_id}")
+        
+        if task_status == 'completed':
+            return await self._show_results(context)
+        else:
+            # 计算运行时间
+            start_time = context.get('task_start_time')
+            elapsed = "几"
+            if start_time:
+                elapsed = int((datetime.now() - datetime.fromisoformat(start_time)).seconds)
+            
+            return {
+                "type": "in_progress", 
+                "message": f"""⏳ {gene} 基因分析进行中...
 
-错误信息：{session.error}
+已运行：{elapsed}秒
 
-请重新输入基因名称开始新的分析，或尝试分析其他基因。""",
-            "status": "error"
-        }
+正在收集和分析数据，请耐心等待...""",
+                "gene": gene,
+                "status": "analyzing"
+            }
     
-    async def _run_analysis(self, session_id: str):
-        """
-        执行实际的分析流程（调用LangGraph）
-        这是核心分析功能！
-        """
-        session = self.sessions[session_id]
+    async def _show_results(self, context: Dict) -> Dict:
+        """显示分析结果"""
+        gene = context.get('current_gene')
+        task_id = context.get('task_id')
         
+        # 使用自己的缓存获取结果
+        cache_key = f"gene_report_{gene}_{datetime.now().strftime('%Y-%m')}"
+        report = self.cache_get(cache_key)
+        
+        if report:
+            return {
+                "type": "completed",
+                "message": f"""✅ {gene} 基因分析完成！
+
+📄 报告已生成：{report.get('report_url', '#')}
+📅 生成时间：{report.get('generated_at', '刚刚')}
+
+报告包含：
+• 文献综述与机制研究
+• 全球临床试验进展
+• 专利布局与技术趋势
+• 商业价值与投资分析
+
+您可以：
+• 下载完整报告
+• 分析其他基因""",
+                "gene": gene,
+                "report_url": report.get('report_url'),
+                "status": "completed"
+            }
+        else:
+            return {
+                "type": "not_ready",
+                "message": f"{gene} 基因分析还在进行中，请稍后查看。",
+                "status": "analyzing"
+            }
+    
+    def _chat_response(self, analysis: Dict) -> Dict:
+        """通用聊天响应"""
+        # 根据分析结果生成合适的回复
+        stage = analysis.get('current_stage', '')
+        intent = analysis.get('user_intent', '')
+        
+        if intent == '闲聊':
+            return {
+                "type": "chat",
+                "message": "我是基因分析助手，专注于帮您分析基因靶点。请问您想了解哪个基因呢？",
+                "status": "waiting_input"
+            }
+        else:
+            return self._request_gene_input()
+    
+    async def _run_analysis(self, gene: str, task_id: str):
+        """
+        执行实际的分析流程（异步后台任务）
+        保持与原有graph_runner的兼容性
+        """
         try:
-            # 导入graph runner
+            # 更新任务状态（使用自己的缓存）
+            self.cache_set(f"task_status_{task_id}", "running", timeout=3600)
+            
+            # 导入并初始化graph runner（保持兼容性）
             from agent_core.state_machine.graph_runner import GraphRunner
             
-            # 初始化runner
             if not self.graph_runner:
                 self.graph_runner = GraphRunner(self.config)
             
-            print(f"[Control Agent] 开始分析 {session.gene}")
+            print(f"[Control Agent] 开始分析 {gene} (任务ID: {task_id})")
             
-            # 运行分析图（LangGraph）
+            # 调用原有的graph runner（保持兼容）
             result = await self.graph_runner.run({
-                "gene_name": session.gene,
+                "gene_name": gene,
                 "mode": "deep",
-                "parallel": self.config.get("parallel", True),
-                "session_context": {
-                    "history_genes": session.genes,
-                    "conversation_count": len(session.messages)
-                }
+                "parallel": self.config.get("parallel", True)
             })
             
-            # 保存结果
+            # 生成报告文件
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            report_filename = f"reports/{session.gene}_report_{timestamp}.html"
+            report_filename = f"reports/{gene}_report_{timestamp}.html"
             
-            # 确保目录存在
+            # 保存报告文件
             import os
             os.makedirs("reports", exist_ok=True)
-            
-            # 写入文件
             with open(report_filename, 'w', encoding='utf-8') as f:
                 f.write(result.get("final_report", ""))
             
-            # 更新会话状态
-            session.state = "completed"
-            session.report = result.get("final_report")
-            session.report_url = report_filename
+            # 使用自己的缓存保存结果（按月缓存）
+            cache_key = f"gene_report_{gene}_{datetime.now().strftime('%Y-%m')}"
+            cache_value = {
+                "report_url": report_filename,
+                "report_content": result.get("final_report"),
+                "generated_at": datetime.now().isoformat(),
+                "gene": gene
+            }
             
-            print(f"[Control Agent] {session.gene} 分析完成，报告已保存至 {report_filename}")
+            # 缓存30天
+            self.cache_set(cache_key, cache_value, timeout=30*24*3600)
             
-        except ImportError as e:
-            print(f"[Control Agent] 导入GraphRunner失败: {str(e)}")
-            session.state = "error"
-            session.error = "分析模块未正确安装"
+            # 更新任务状态
+            self.cache_set(f"task_status_{task_id}", "completed", timeout=3600)
+            
+            print(f"[Control Agent] {gene} 分析完成，报告已保存: {report_filename}")
             
         except Exception as e:
-            print(f"[Control Agent] 分析出错: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            session.state = "error"
-            session.error = str(e)
+            print(f"[Control Agent] 分析任务失败: {str(e)}")
+            self.cache_set(f"task_status_{task_id}", f"error: {str(e)}", timeout=3600)
     
-    def get_conversation_history(self, session_id: str) -> List[Dict]:
-        """获取会话历史"""
-        session = self.get_or_create_session(session_id)
-        return session.messages
+    # ========== 缓存管理接口方法 ==========
+    def get_cached_report(self, gene: str) -> Optional[Dict]:
+        """
+        获取缓存的基因报告（对外接口）
+        
+        Args:
+            gene: 基因名称
+            
+        Returns:
+            缓存的报告数据，如果没有则返回None
+        """
+        cache_key = f"gene_report_{gene}_{datetime.now().strftime('%Y-%m')}"
+        return self.cache_get(cache_key)
     
-    def clear_session(self, session_id: str):
-        """清空会话"""
-        if session_id in self.sessions:
-            del self.sessions[session_id]
+    def clear_gene_cache(self, gene: str) -> bool:
+        """
+        清除特定基因的缓存（强制刷新）
+        
+        Args:
+            gene: 基因名称
+            
+        Returns:
+            是否成功清除
+        """
+        cache_key = f"gene_report_{gene}_{datetime.now().strftime('%Y-%m')}"
+        return self.cache_delete(cache_key)
+    
+    def get_cache_status(self) -> Dict:
+        """
+        获取缓存状态信息
+        
+        Returns:
+            缓存统计信息
+        """
+        # 内存缓存统计
+        memory_count = len(self._cache_store)
+        
+        # 文件缓存统计
+        file_count = 0
+        if os.path.exists(self._cache_dir):
+            file_count = len([f for f in os.listdir(self._cache_dir) if f.endswith('.cache')])
+        
+        return {
+            "memory_cache_count": memory_count,
+            "file_cache_count": file_count,
+            "cache_directory": self._cache_dir,
+            "cached_genes": self._get_cached_genes()
+        }
+    
+    def _get_cached_genes(self) -> List[str]:
+        """获取所有缓存的基因列表"""
+        genes = []
+        for key in self._cache_store.keys():
+            if key.startswith("gene_report_"):
+                gene = key.split("_")[2]  # gene_report_GENENAME_YYYY-MM
+                if gene not in genes:
+                    genes.append(gene)
+        return genes
 
 
-# 测试函数
-async def test_multiround_control():
-    """测试多轮对话的Control Agent"""
-    control = ControlAgent()
-    session_id = "test_multi_123"
+# 便于测试的辅助函数
+async def test_control_agent():
+    """测试无状态的Control Agent"""
+    agent = ControlAgent()
     
-    print("=== 测试多轮对话+LLM+LangGraph ===\n")
+    # 测试场景1：初始对话
+    print("\n=== 测试1：初始对话 ===")
+    response = await agent.process_message(
+        "我想做基因分析",
+        []  # 空历史
+    )
+    print(response['message'])
     
-    # 第一轮
-    print("用户：你好")
-    r1 = await control.process_message("你好", session_id)
-    print(f"助手：{r1['message'][:100]}...\n")
+    # 测试场景2：提到基因
+    print("\n=== 测试2：提到基因 ===") 
+    history = [
+        {"role": "user", "content": "我想做基因分析"},
+        {"role": "assistant", "content": "请告诉我您想分析的基因"}
+    ]
+    response = await agent.process_message(
+        "帮我看看IL17RA",
+        history
+    )
+    print(response['message'])
     
-    # 第二轮
-    print("用户：我想分析IL17RA")
-    r2 = await control.process_message("我想分析IL17RA", session_id)
-    print(f"助手：{r2['message'][:100]}...")
-    print(f"识别的基因：{r2.get('gene')}\n")
+    # 测试场景3：确认分析
+    print("\n=== 测试3：确认分析 ===")
+    history.append({"role": "user", "content": "帮我看看IL17RA"})
+    history.append({"role": "assistant", "content": response['message']})
     
-    # 第三轮
-    print("用户：还有PCSK9")
-    r3 = await control.process_message("还有PCSK9", session_id)
-    print(f"助手：{r3['message'][:100]}...")
-    print(f"基因列表：{r3.get('genes')}\n")
-    
-    # 第四轮
-    print("用户：先分析第一个")
-    r4 = await control.process_message("先分析第一个", session_id)
-    print(f"助手：{r4['message'][:100]}...\n")
-    
-    # 第五轮
-    print("用户：确认")
-    r5 = await control.process_message("确认", session_id)
-    print(f"助手：{r5['message'][:100]}...")
-    print(f"任务状态：{r5.get('status')}\n")
-    
-    # 查看历史
-    history = control.get_conversation_history(session_id)
-    print(f"对话历史：{len(history)}条消息")
-    print(f"涉及的基因：{control.sessions[session_id].genes}")
+    response = await agent.process_message(
+        "确认",
+        history
+    )
+    print(response['message'])
 
 
 if __name__ == "__main__":
-    asyncio.run(test_multiround_control())
+    asyncio.run(test_control_agent())
