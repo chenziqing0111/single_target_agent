@@ -1,5 +1,43 @@
+{%load static %}
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>EPIREG.AI - CRISPR Design Platform</title>
+    <!-- 自定义样式 -->
+    <link type="text/css" rel="stylesheet" href="{% static 'css/css.css' %}">
+</head>
+<body>
+    <!-- Logo 部分 -->
+    <div class="logo text-center my-4">
+        <a href="http://192.168.10.237:8000/epigenictx.ai/"><img src="{% static 'img/logo.svg' %}" alt="EPI.AI Logo" height="80" width="200"></a>
+    </div>
+
+    <!-- 改进后的导航栏 -->
+    <nav class="custom-navbar">
+        <div class="nav-container">
+            <ul class="nav-list">
+                <li class="nav-item">
+                    <a class="nav-link" href="http://192.168.10.237:8000/epigenictx.ai/">Epigenictx.ai</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link" href="http://192.168.10.237:8000/epi/">Targetable Gene Predict</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link" href="http://192.168.10.237:8000/sgRNA/">sgRNA Design</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link" href="http://192.168.10.237:8000/ZF/">ZincFinger Design</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link" href="http://192.168.10.237:8000/GeneEditingEfficiency/">Gene Editing Efficiency</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link" href="http://192.168.10.237:8000/help/">Help & Evolution</a>
+                </li> 
+            </ul>
+        </div>
+    </nav>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
